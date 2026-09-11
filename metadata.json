@@ -1,0 +1,6 @@
+{
+  "name": "Laporan Kegiatan",
+  "description": "Aplikasi laporan kegiatan 1 slide dengan foto dan video.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
