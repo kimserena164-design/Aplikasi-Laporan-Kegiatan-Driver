@@ -10,7 +10,7 @@ data class ReportEntity(
     val location: String,
     val date: String = "",
     val description: String,
-    val imageUri: String?,
+    val imageUris: String,
     val videoUri: String?,
     val timestamp: Long = System.currentTimeMillis()
 )

@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -58,8 +59,20 @@ import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationServices
+import android.location.Geocoder
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.widget.Toast
+import androidx.compose.material.icons.filled.GpsFixed
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.FileOutputStream
 
 // --- Models ---
 data class ReportData(
@@ -67,7 +80,7 @@ data class ReportData(
     val location: String = "",
     val date: String = "",
     val description: String = "",
-    val imageUri: Uri? = null,
+    val imageUris: List<Uri> = emptyList(),
     val videoUri: Uri? = null
 )
 
@@ -92,7 +105,7 @@ class ReportViewModel(private val repository: ReportRepository) : ViewModel() {
                 location = current.location,
                 date = current.date,
                 description = current.description,
-                imageUri = current.imageUri?.toString(),
+                imageUris = current.imageUris.joinToString(",") { it.toString() },
                 videoUri = current.videoUri?.toString()
             )
             if (editingId == null) {
@@ -111,7 +124,7 @@ class ReportViewModel(private val repository: ReportRepository) : ViewModel() {
             location = entity.location,
             date = entity.date,
             description = entity.description,
-            imageUri = entity.imageUri?.let { Uri.parse(it) },
+            imageUris = entity.imageUris.split(",").filter { it.isNotBlank() }.map { Uri.parse(it) },
             videoUri = entity.videoUri?.let { Uri.parse(it) }
         )
     }
@@ -131,7 +144,7 @@ class ReportViewModel(private val repository: ReportRepository) : ViewModel() {
                     location = current.location,
                     date = current.date,
                     description = current.description,
-                    imageUri = current.imageUri?.toString(),
+                    imageUris = current.imageUris.joinToString(",") { it.toString() },
                     videoUri = current.videoUri?.toString()
                 )
                 repository.delete(entity)
@@ -152,11 +165,26 @@ class ReportViewModel(private val repository: ReportRepository) : ViewModel() {
     fun updateDescription(newDescription: String) {
         _reportData.value = _reportData.value.copy(description = newDescription)
     }
-    fun updateImage(uri: Uri?) {
-        _reportData.value = _reportData.value.copy(imageUri = uri)
+    fun addImage(uri: Uri) {
+        val current = _reportData.value.imageUris
+        if (current.size < 3) {
+            _reportData.value = _reportData.value.copy(imageUris = current + uri)
+        }
+    }
+    fun setImages(uris: List<Uri>) {
+        _reportData.value = _reportData.value.copy(imageUris = uris.take(3))
     }
     fun updateVideo(uri: Uri?) {
         _reportData.value = _reportData.value.copy(videoUri = uri)
+    }
+}
+
+class ThemeViewModel : ViewModel() {
+    private val _isDarkMode = MutableStateFlow<Boolean?>(null) // null means follow system
+    val isDarkMode = _isDarkMode.asStateFlow()
+
+    fun setDarkMode(isDark: Boolean?) {
+        _isDarkMode.value = isDark
     }
 }
 
@@ -179,10 +207,27 @@ class MainActivity : ComponentActivity() {
         val repository = ReportRepository(db.reportDao())
         val viewModelFactory = ReportViewModelFactory(repository)
         val viewModel = ViewModelProvider(this, viewModelFactory)[ReportViewModel::class.java]
+        val themeViewModel = ViewModelProvider(this)[ThemeViewModel::class.java]
 
         enableEdgeToEdge()
         setContent {
-            MyApplicationTheme {
+            val isDarkThemeState by themeViewModel.isDarkMode.collectAsStateWithLifecycle()
+            val useDarkTheme = isDarkThemeState ?: androidx.compose.foundation.isSystemInDarkTheme()
+
+            LaunchedEffect(useDarkTheme) {
+                enableEdgeToEdge(
+                    statusBarStyle = androidx.activity.SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    ) { useDarkTheme },
+                    navigationBarStyle = androidx.activity.SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    ) { useDarkTheme }
+                )
+            }
+
+            MyApplicationTheme(darkTheme = useDarkTheme) {
                 val navController = rememberNavController()
                 NavHost(navController = navController, startDestination = "home") {
                     composable("home") {
@@ -190,6 +235,9 @@ class MainActivity : ComponentActivity() {
                     }
                     composable("form") {
                         FormScreen(viewModel, navController)
+                    }
+                    composable("settings") {
+                        SettingsScreen(navController, themeViewModel)
                     }
                     composable("slide") {
                         SlideScreen(viewModel, navController)
@@ -200,7 +248,7 @@ class MainActivity : ComponentActivity() {
                             mode = mode,
                             onMediaCaptured = { uri ->
                                 if (mode == "photo") {
-                                    viewModel.updateImage(uri)
+                                    viewModel.addImage(uri)
                                 } else {
                                     viewModel.updateVideo(uri)
                                 }
@@ -230,7 +278,12 @@ fun HomeScreen(viewModel: ReportViewModel, navController: NavController) {
                 title = { Text("Daftar Laporan") },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
+                ),
+                actions = {
+                    IconButton(onClick = { navController.navigate("settings") }) {
+                        Icon(Icons.Default.Settings, contentDescription = "Pengaturan")
+                    }
+                }
             )
         },
         floatingActionButton = {
@@ -288,8 +341,12 @@ fun FormScreen(viewModel: ReportViewModel, navController: NavController) {
     
     // Launchers for picking media
     val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
-        onResult = { uri -> uri?.let { viewModel.updateImage(it) } }
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 3),
+        onResult = { uris -> 
+            if (uris.isNotEmpty()) {
+                viewModel.setImages(uris)
+            }
+        }
     )
     
     val videoPicker = rememberLauncherForActivityResult(
@@ -357,13 +414,69 @@ fun FormScreen(viewModel: ReportViewModel, navController: NavController) {
                 singleLine = true
             )
 
+            val context = LocalContext.current
+            val scope = rememberCoroutineScope()
+            val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+            
+            val locationPermissionRequest = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestMultiplePermissions()
+            ) { permissions ->
+                val fineLocationGranted = permissions.getOrDefault(Manifest.permission.ACCESS_FINE_LOCATION, false)
+                val coarseLocationGranted = permissions.getOrDefault(Manifest.permission.ACCESS_COARSE_LOCATION, false)
+                
+                if (fineLocationGranted || coarseLocationGranted) {
+                    try {
+                        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                            if (location != null) {
+                                scope.launch {
+                                    val addressString = withContext(Dispatchers.IO) {
+                                        try {
+                                            val geocoder = Geocoder(context, Locale.getDefault())
+                                            val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+                                            if (!addresses.isNullOrEmpty()) {
+                                                val address = addresses[0]
+                                                address.getAddressLine(0) ?: "${location.latitude}, ${location.longitude}"
+                                            } else {
+                                                "${location.latitude}, ${location.longitude}"
+                                            }
+                                        } catch (e: Exception) {
+                                            "${location.latitude}, ${location.longitude}"
+                                        }
+                                    }
+                                    viewModel.updateLocation(addressString)
+                                    Toast.makeText(context, "Lokasi berhasil didapatkan", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                Toast.makeText(context, "Gagal mendapatkan lokasi. Pastikan GPS aktif.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } catch (e: SecurityException) {
+                        Toast.makeText(context, "Izin lokasi ditolak", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "Izin lokasi diperlukan", Toast.LENGTH_SHORT).show()
+                }
+            }
+
             OutlinedTextField(
                 value = reportData.location,
                 onValueChange = { viewModel.updateLocation(it) },
                 label = { Text("Lokasi Kegiatan") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                leadingIcon = { Icon(Icons.Default.LocationOn, contentDescription = null) }
+                leadingIcon = { Icon(Icons.Default.LocationOn, contentDescription = null) },
+                trailingIcon = {
+                    IconButton(onClick = {
+                        locationPermissionRequest.launch(
+                            arrayOf(
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        )
+                    }) {
+                        Icon(Icons.Default.GpsFixed, contentDescription = "Dapatkan Lokasi Saat Ini", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
             )
 
             var showDatePicker by remember { mutableStateOf(false) }
@@ -434,16 +547,20 @@ fun FormScreen(viewModel: ReportViewModel, navController: NavController) {
                 // Image Box
                 MediaPickerBox(
                     modifier = Modifier.weight(1f),
-                    title = "Foto Kegiatan",
+                    title = if (reportData.imageUris.isNotEmpty()) "${reportData.imageUris.size}/3 Foto" else "Foto Kegiatan",
                     icon = Icons.Default.Image,
-                    hasMedia = reportData.imageUri != null,
+                    hasMedia = reportData.imageUris.isNotEmpty(),
                     onGalleryClick = {
                         imagePicker.launch(
                             androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     },
                     onCameraClick = {
-                        navController.navigate("camera/photo")
+                        if (reportData.imageUris.size < 3) {
+                            navController.navigate("camera/photo")
+                        } else {
+                            // User should clear or something, but we'll let it overwrite or just ignore if they click
+                        }
                     }
                 )
 
@@ -570,7 +687,7 @@ fun SlideScreen(viewModel: ReportViewModel, navController: NavController) {
                             location = reportData.location,
                             date = reportData.date,
                             description = reportData.description,
-                            imageUri = reportData.imageUri,
+                            imageUris = reportData.imageUris,
                             videoUri = reportData.videoUri
                         )
                         isExporting = false
@@ -651,45 +768,40 @@ fun SlideScreen(viewModel: ReportViewModel, navController: NavController) {
                     HorizontalDivider(color = Color(0xFFE0E0E0))
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Media Grid (Side by side if landscape, or top-bottom if portrait slide. We'll do top-bottom for mobile view)
+                    // Media Grid (2x2 style)
                     Column(
                         modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Image section
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFFF5F5F5)),
-                            contentAlignment = Alignment.Center
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (reportData.imageUri != null) {
-                                AsyncImage(
-                                    model = reportData.imageUri,
-                                    contentDescription = "Foto Kegiatan",
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
-                                )
+                            // Slot 1: Image 1
+                            MediaSlot(modifier = Modifier.weight(1f), uri = reportData.imageUris.getOrNull(0), isVideo = false)
+                            // Slot 2: Image 2 or Video (if no more images)
+                            if (reportData.imageUris.size > 1) {
+                                MediaSlot(modifier = Modifier.weight(1f), uri = reportData.imageUris.getOrNull(1), isVideo = false)
                             } else {
-                                Text("Tidak ada foto", color = Color.Gray)
+                                MediaSlot(modifier = Modifier.weight(1f), uri = reportData.videoUri, isVideo = true)
                             }
                         }
-
-                        // Video section
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF000000)),
-                            contentAlignment = Alignment.Center
+                        
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (reportData.videoUri != null) {
-                                VideoPlayer(uri = reportData.videoUri)
+                            // Slot 3: Image 3 or Video
+                            if (reportData.imageUris.size > 2) {
+                                MediaSlot(modifier = Modifier.weight(1f), uri = reportData.imageUris.getOrNull(2), isVideo = false)
+                                MediaSlot(modifier = Modifier.weight(1f), uri = reportData.videoUri, isVideo = true)
+                            } else if (reportData.imageUris.size == 2) {
+                                MediaSlot(modifier = Modifier.weight(1f), uri = reportData.videoUri, isVideo = true)
+                                Spacer(modifier = Modifier.weight(1f))
                             } else {
-                                Text("Tidak ada video", color = Color.Gray)
+                                // Image size <= 1, video already shown in top row
+                                Spacer(modifier = Modifier.weight(1f))
+                                Spacer(modifier = Modifier.weight(1f))
                             }
                         }
                     }
@@ -705,6 +817,32 @@ fun SlideScreen(viewModel: ReportViewModel, navController: NavController) {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun MediaSlot(modifier: Modifier = Modifier, uri: Uri?, isVideo: Boolean) {
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isVideo) Color(0xFF000000) else Color(0xFFF5F5F5)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (uri != null) {
+            if (isVideo) {
+                VideoPlayer(uri = uri)
+            } else {
+                AsyncImage(
+                    model = uri,
+                    contentDescription = "Foto Kegiatan",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+        } else {
+            Text(if (isVideo) "Tidak ada video" else "Tidak ada foto", color = Color.Gray)
         }
     }
 }
@@ -734,4 +872,286 @@ fun VideoPlayer(uri: Uri?) {
             view.setVideoURI(uri)
         }
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(navController: NavController, themeViewModel: ThemeViewModel) {
+    val context = LocalContext.current
+    var logoUri by remember { mutableStateOf<Uri?>(null) }
+    var bgUri by remember { mutableStateOf<Uri?>(null) }
+    val scrollState = rememberScrollState()
+    
+    // Check if files exist initially
+    LaunchedEffect(Unit) {
+        val logoFile = File(context.filesDir, "app_logo_image")
+        if (logoFile.exists()) {
+            logoUri = Uri.fromFile(logoFile)
+        }
+        val bgFile = File(context.filesDir, "app_bg_image")
+        if (bgFile.exists()) {
+            bgUri = Uri.fromFile(bgFile)
+        }
+    }
+
+    val logoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri)
+                val file = File(context.filesDir, "app_logo_image")
+                val outputStream = FileOutputStream(file)
+                inputStream?.copyTo(outputStream)
+                inputStream?.close()
+                outputStream.close()
+                logoUri = Uri.fromFile(file)
+                Toast.makeText(context, "Logo berhasil disimpan", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(context, "Gagal menyimpan logo", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val bgLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri)
+                val file = File(context.filesDir, "app_bg_image")
+                val outputStream = FileOutputStream(file)
+                inputStream?.copyTo(outputStream)
+                inputStream?.close()
+                outputStream.close()
+                bgUri = Uri.fromFile(file)
+                Toast.makeText(context, "Background berhasil disimpan", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(context, "Gagal menyimpan background", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Pengaturan PPTX") },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Kembali")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(scrollState)
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Top
+        ) {
+            // --- Theme Section ---
+            val isDarkMode by themeViewModel.isDarkMode.collectAsStateWithLifecycle()
+            
+            Text(
+                text = "Tema Aplikasi",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Mode Gelap (Dark Mode)",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Switch(
+                    checked = isDarkMode ?: androidx.compose.foundation.isSystemInDarkTheme(),
+                    onCheckedChange = { isChecked ->
+                        themeViewModel.setDarkMode(isChecked)
+                    }
+                )
+            }
+            
+            Text(
+                text = "Ikuti sistem: ${if (isDarkMode == null) "Ya" else "Tidak"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Gray,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Start
+            )
+            
+            if (isDarkMode != null) {
+                TextButton(
+                    onClick = { themeViewModel.setDarkMode(null) },
+                    modifier = Modifier.align(Alignment.Start)
+                ) {
+                    Text("Kembalikan ke Setelan Sistem")
+                }
+            }
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
+            
+            // --- Logo Section ---
+            Text(
+                text = "Logo Aplikasi",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            Box(
+                modifier = Modifier
+                    .size(120.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFFE0E0E0))
+                    .clickable {
+                        logoLauncher.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                            )
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                if (logoUri != null) {
+                    AsyncImage(
+                        model = logoUri,
+                        contentDescription = "Logo",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
+                    )
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(32.dp), tint = Color.Gray)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Pilih Logo", color = Color.Gray, fontSize = 12.sp)
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        logoLauncher.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                            )
+                        )
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (logoUri != null) "Ganti Logo" else "Unggah Logo")
+                }
+                
+                if (logoUri != null) {
+                    OutlinedButton(
+                        onClick = {
+                            val file = File(context.filesDir, "app_logo_image")
+                            if (file.exists()) { file.delete() }
+                            logoUri = null
+                            Toast.makeText(context, "Logo dihapus", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Hapus", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 24.dp))
+            
+            // --- Background Section ---
+            Text(
+                text = "Background Slide",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+            
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(200.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFFE0E0E0))
+                    .clickable {
+                        bgLauncher.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                            )
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                if (bgUri != null) {
+                    AsyncImage(
+                        model = bgUri,
+                        contentDescription = "Background",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(48.dp), tint = Color.Gray)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Pilih Background template PPTX", color = Color.Gray)
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        bgLauncher.launch(
+                            androidx.activity.result.PickVisualMediaRequest(
+                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                            )
+                        )
+                    },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (bgUri != null) "Ganti Background" else "Unggah Background")
+                }
+                
+                if (bgUri != null) {
+                    OutlinedButton(
+                        onClick = {
+                            val file = File(context.filesDir, "app_bg_image")
+                            if (file.exists()) { file.delete() }
+                            bgUri = null
+                            Toast.makeText(context, "Background dihapus", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Hapus", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(32.dp))
+            Text(
+                text = "Media yang diunggah akan otomatis ditambahkan ke laporan (PPTX) yang Anda hasilkan.",
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                color = Color.Gray
+            )
+        }
+    }
 }

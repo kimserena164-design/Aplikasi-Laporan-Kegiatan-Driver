@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Laporan Kegiatan"
+rootProject.name = "Laporan Kegiatan Driver"
 
 include(":app")
